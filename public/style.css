@@ -263,6 +263,10 @@ body {
     .calendar-grid {
         grid-template-columns: repeat(2, 1fr);
     }
+
+    .calendar-day.empty {
+        display: none;
+    }
 }
 
 @media (max-width: 480px) {
