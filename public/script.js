@@ -1,4 +1,6 @@
-const API_URL = 'http://localhost:5000/api/milk';
+const API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && window.location.port !== '5001'
+    ? 'http://localhost:5001/api/milk'
+    : '/api/milk';
 
 // State
 let currentDate = new Date();
@@ -6,6 +8,7 @@ let currentMonth = currentDate.getMonth();
 let currentYear = currentDate.getFullYear();
 let entries = [];
 let selectedDate = null;
+let isUpdating = false;
 
 // Charts
 let dailyChart = null;
@@ -19,6 +22,7 @@ let filterEndDate = null;
 const calendarGrid = document.getElementById('calendar-grid');
 const currentMonthDisplay = document.getElementById('current-month-display');
 const modal = document.getElementById('entry-modal');
+const confirmModal = document.getElementById('confirm-modal');
 const modalDateTitle = document.getElementById('modal-date-title');
 const totalDisplay = document.getElementById('live-total');
 
@@ -80,7 +84,19 @@ function setupEventListeners() {
     // Modal
     document.getElementById('btn-cancel').addEventListener('click', closeModal);
     document.getElementById('btn-save').addEventListener('click', saveEntry);
-    document.getElementById('btn-delete').addEventListener('click', deleteEntry);
+    document.getElementById('btn-delete').addEventListener('click', (e) => {
+        e.preventDefault();
+        confirmModal.classList.remove('hidden');
+        // Small timeout to allow display:flex to apply before opacity transition
+        setTimeout(() => confirmModal.classList.add('visible'), 10);
+    });
+
+    // Confirm Modal
+    document.getElementById('confirm-cancel').addEventListener('click', () => {
+        confirmModal.classList.remove('visible');
+        setTimeout(() => confirmModal.classList.add('hidden'), 300);
+    });
+    document.getElementById('confirm-yes').addEventListener('click', confirmDelete);
 
     [priceInput, morningInput, nightInput].forEach(inp => {
         inp.addEventListener('input', calculateModalDetails);
@@ -128,7 +144,7 @@ async function loadMonthData() {
 
     try {
         const mStr = String(currentMonth + 1).padStart(2, '0');
-        const res = await fetch(`${API_URL}/month?year=${currentYear}&month=${mStr}`);
+        const res = await fetch(`${API_URL}/month?year=${currentYear}&month=${mStr}&v=${Date.now()}`);
 
         let fetchedEntries = [];
         if (res.ok) {
@@ -139,6 +155,7 @@ async function loadMonthData() {
 
         // Ensure array
         entries = Array.isArray(fetchedEntries) ? fetchedEntries : [];
+        console.log(`Loaded ${entries.length} entries for ${currentMonthDisplay.innerText}`);
 
         // Fetch last month safely
         let lastEntries = [];
@@ -155,6 +172,12 @@ async function loadMonthData() {
 
         lastEntries = Array.isArray(lastEntries) ? lastEntries : [];
 
+        // Race condition check: if user switched to filter mode while we were fetching month data, don't overwrite
+        if (isFilterMode) {
+            console.log("loadMonthData fetch finished but isFilterMode is true. Skipping render.");
+            return;
+        }
+
         renderCalendar();
         updateSummary(entries, lastEntries);
     } catch (err) {
@@ -169,8 +192,12 @@ let filteredDates = []; // Changed from filteredEntries to filteredDates to impl
 let isFilterMode = false;
 
 function applyFilters() {
-    const startSensitive = document.getElementById('filter-start').value;
-    const endSensitive = document.getElementById('filter-end').value;
+    const startInput = document.getElementById('filter-start');
+    const endInput = document.getElementById('filter-end');
+    const startSensitive = startInput.value;
+    const endSensitive = endInput.value;
+
+    console.log("Apply Filters clicked. Raw values:", { startSensitive, endSensitive });
 
     if (!startSensitive || !endSensitive) {
         alert("Please select both Start and End dates.");
@@ -189,10 +216,18 @@ function applyFilters() {
         return;
     }
 
+    console.log("Normalized Filter Range:", filterStartDate.toDateString(), "to", filterEndDate.toDateString());
+
     isFilterMode = true;
 
-    // Clear Header IMMEDIATELY
-    currentMonthDisplay.innerText = "";
+    // Show exact range in Header and show Loading in Grid IMMEDIATELY
+    currentMonthDisplay.innerText = `${formatDateDisplay(filterStartDate)} to ${formatDateDisplay(filterEndDate)}`;
+    calendarGrid.innerHTML = '<div style="grid-column: 1/-1; text-align:center; padding:40px; color:var(--text-sub);"><i data-lucide="loader-2" class="spin"></i> Loading filtered data...</div>';
+    if (window.lucide) lucide.createIcons();
+
+    const summaryTitle = document.querySelector('.summary-card h3');
+    if (summaryTitle) summaryTitle.innerText = "Filtered Summary";
+
     document.getElementById('prev-month').style.display = 'none';
     document.getElementById('next-month').style.display = 'none';
 
@@ -207,22 +242,38 @@ function clearFilters() {
     filterEndDate = null;
     isFilterMode = false;
 
-    // Hide Pagination Controls
+    // Hide Pagination Controls initially
     const controls = document.getElementById('pagination-controls');
     if (controls) controls.classList.add('hidden');
+
+    const summaryTitle = document.querySelector('.summary-card h3');
+    if (summaryTitle) summaryTitle.innerText = "Monthly Summary";
+
+    // Hide CSV Button
+    const csvBtn = document.getElementById('export-csv');
+    if (csvBtn) csvBtn.classList.add('hidden');
 
     loadMonthData();
 }
 
 async function loadFilteredData() {
     try {
-        const res = await fetch(`${API_URL}/all`);
-        if (!res.ok) throw new Error('Fetch failed');
+        console.log("Fetching all entries for filter matching from:", filterStartDate.toDateString());
+        const res = await fetch(`${API_URL}/all?v=${Date.now()}`);
+        if (!res.ok) throw new Error(`Fetch failed with status ${res.status}`);
         const allEntries = await res.json();
+
+        if (!Array.isArray(allEntries)) {
+            console.error("Payload is not an array:", allEntries);
+            throw new Error('Server returned invalid data format (expected array)');
+        }
+
+        console.log("Total entries fetched:", allEntries.length);
 
         // Generate ALL dates in range
         filteredDates = [];
         let ptr = new Date(filterStartDate);
+        console.log("Starting date generation from:", ptr.toDateString(), "to", filterEndDate.toDateString());
 
         while (ptr <= filterEndDate) {
             // Create YYYY-MM-DD string
@@ -243,6 +294,7 @@ async function loadFilteredData() {
             ptr.setDate(ptr.getDate() + 1);
         }
 
+        console.log(`Generated ${filteredDates.length} days in range. First: ${filteredDates[0]?.dateStr}, Last: ${filteredDates[filteredDates.length - 1]?.dateStr}`);
         renderPaginationGrid();
 
         // Calculate Summary for Range
@@ -251,12 +303,11 @@ async function loadFilteredData() {
             .map(d => d.entry)
             .filter(e => e !== null);
 
-        updateSummary(validEntries, []);
-        updateChartForRange(filteredDates); // Use new char function for range
-        updateChartForRange(filteredDates); // Use new char function for range
+        updateSummary(validEntries, [], true); // Pass true to skip monthly chart update
+        updateChartForRange(filteredDates);
 
         // Header is already cleared in applyFilters, but ensure it stays cleared
-        currentMonthDisplay.innerText = "";
+        currentMonthDisplay.innerText = `${formatDateDisplay(filterStartDate)} to ${formatDateDisplay(filterEndDate)}`;
         document.getElementById('prev-month').style.display = 'none';
         document.getElementById('next-month').style.display = 'none';
 
@@ -264,7 +315,11 @@ async function loadFilteredData() {
         const csvBtn = document.getElementById('export-csv');
         if (csvBtn) csvBtn.classList.remove('hidden');
 
-    } catch (err) { console.error(err); }
+    } catch (err) {
+        console.error("Filter Error:", err);
+        calendarGrid.innerHTML = `<div style="grid-column: 1/-1; text-align:center; padding:20px; color:var(--danger);">Error loading data: ${err.message}. Please try again.</div>`;
+        alert("There was an error applying the filter. Check the console for details.");
+    }
 }
 
 function renderPaginationGrid() {
@@ -343,7 +398,7 @@ function createDayCard(dateObj, entry) {
     // Ideally rely on the entry string if available, else format carefully.
 
     // entry.date is YYYY-MM-DD. Use that if available.
-    const dateStr = entry ? entry.date : `${y}-${m}-${d}`;
+    const dateStr = entry ? entry.date : `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
     const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
     const dd_mm = `${d}-${m}-${y}`;
@@ -396,13 +451,6 @@ function renderCalendar() {
 
     calendarGrid.innerHTML = '';
 
-    const firstDay = new Date(currentYear, currentMonth, 1).getDay();
-    for (let i = 0; i < firstDay; i++) {
-        const div = document.createElement('div');
-        div.className = 'calendar-day empty';
-        calendarGrid.appendChild(div);
-    }
-
     const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
 
     for (let d = 1; d <= daysInMonth; d++) {
@@ -422,6 +470,7 @@ function renderCalendar() {
 
 function openModal(dateStr, entry) {
     selectedDate = dateStr;
+    isUpdating = entry ? true : false;
     const dateObj = new Date(dateStr);
 
     let displayTitle = dateStr;
@@ -504,25 +553,36 @@ async function saveEntry(e) {
         triggerConfetti();
         closeModal();
         loadMonthData();
+
+        // Show specific success message
+        const msg = isUpdating ? "Updated successfully" : "Entered successfully";
+        showToast(msg);
     } catch (err) {
         alert(err.message);
     }
 }
 
-async function deleteEntry(e) {
-    e.preventDefault();
-    if (!confirm('Clear this day?')) return;
+async function confirmDelete() {
     try {
         const res = await fetch(`${API_URL}/entry/${selectedDate}`, { method: 'DELETE' });
         if (!res.ok) throw new Error("Delete failed");
 
+        confirmModal.classList.remove('visible');
+        setTimeout(() => confirmModal.classList.add('hidden'), 300);
+
         closeModal();
         // Wait small amount to ensure server processes
         setTimeout(() => loadMonthData(), 100);
+        showToast("Entry deleted successfully");
     } catch (err) { alert(err.message); }
 }
 
-function updateSummary(current, last) {
+function deleteEntry(e) {
+    if (e) e.preventDefault();
+    confirmModal.classList.remove('hidden');
+}
+
+function updateSummary(current, last, isForFilterRange = false) {
     // Safety check
     if (!Array.isArray(current)) current = [];
     if (!Array.isArray(last)) last = [];
@@ -533,36 +593,39 @@ function updateSummary(current, last) {
     summaryTotal.innerText = `₹${totalCost.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
     lastMonthTotalEl.innerText = `₹${lastTotalCost.toFixed(2)}`;
 
-    // Change metric removed
-    // let change = 0;
-    // if (lastTotalCost > 0) change = ((totalCost - lastTotalCost) / lastTotalCost) * 100;
-    // monthChangeEl.innerText = `${change > 0 ? '+' : ''}${change.toFixed(0)}%`;
-    // monthChangeEl.style.color = change >= 0 ? 'var(--danger)' : 'var(--success)';
-
     const totalLitres = current.reduce((acc, e) => acc + (e.morningLitres || 0) + (e.nightLitres || 0), 0);
     summaryLitres.innerText = `${totalLitres} L`;
 
     const today = new Date();
-    let divisor = new Date(currentYear, currentMonth + 1, 0).getDate();
-    if (currentYear === today.getFullYear() && currentMonth === today.getMonth()) divisor = today.getDate();
+    let divisor;
+
+    if (isForFilterRange) {
+        // For filter range, use the number of actual dates generated
+        divisor = filteredDates.length;
+    } else {
+        divisor = new Date(currentYear, currentMonth + 1, 0).getDate();
+        if (currentYear === today.getFullYear() && currentMonth === today.getMonth()) divisor = today.getDate();
+    }
 
     const avg = totalCost / (divisor || 1);
     summaryAvg.innerText = `₹${avg.toFixed(2)}`;
 
     if (current.length > 0) {
-        const sorted = [...current].sort((a, b) => b.total - a.total);
+        const sorted = [...current].sort((a, b) => (b.total || 0) - (a.total || 0));
         const max = sorted[0];
-        const nonZero = sorted.filter(e => e.total > 0);
+        const nonZero = sorted.filter(e => (e.total || 0) > 0);
         const least = nonZero.length > 0 ? nonZero[nonZero.length - 1] : null;
 
-        mostExpEl.innerText = max ? `${max.date.split('-')[2]} (₹${max.total})` : '—';
-        leastExpEl.innerText = least ? `${least.date.split('-')[2]} (₹${least.total})` : '—';
+        mostExpEl.innerText = max ? `₹${max.total.toFixed(2)}` : '—';
+        leastExpEl.innerText = least ? `₹${least.total.toFixed(2)}` : '—';
     } else {
         mostExpEl.innerText = '—';
         leastExpEl.innerText = '—';
     }
 
-    updateDailyChart(current);
+    if (!isForFilterRange) {
+        updateDailyChart(current);
+    }
 }
 
 // CHARTS
@@ -760,6 +823,27 @@ function triggerConfetti() {
         if (active) requestAnimationFrame(animate);
     }
     animate();
+}
+
+function showToast(message) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = `
+        <i data-lucide="check-circle"></i>
+        <span>${message}</span>
+    `;
+    container.appendChild(toast);
+
+    // Initial lucide icons for new element
+    if (window.lucide) lucide.createIcons();
+
+    // Remove toast from DOM after animation finishes
+    setTimeout(() => {
+        toast.remove();
+    }, 3200); // match toast-out animation end
 }
 
 /* CALCULATOR LOGIC */
