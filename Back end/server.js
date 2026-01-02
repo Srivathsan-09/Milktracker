@@ -18,10 +18,10 @@ app.use(bodyParser.json());
 app.use('/api/milk', milkRoutes);
 
 // Serves static frontend files
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, '../Front end/public')));
 
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    res.sendFile(path.join(__dirname, '../Front end/public', 'index.html'));
 });
 
 const PORT = process.env.PORT || 5001;
